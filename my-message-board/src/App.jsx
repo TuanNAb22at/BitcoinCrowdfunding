@@ -1,192 +1,199 @@
-import React, { useState, useEffect } from 'react';
-import { connect, StacksTestnet } from '@stacks/connect';
-import { AppConfig, UserSession } from '@stacks/connect';
-import { ContractCallOptions, openContractCall } from '@stacks/connect';
+import { useState, useEffect } from "react";
+import { connect, disconnect, isConnected, request } from "@stacks/connect";
+import {
+  fetchCallReadOnlyFunction,
+  stringUtf8CV,
+  uintCV,
+} from "@stacks/transactions";
+import "./App.css";
 
-const appConfig = new AppConfig(['store_write', 'publish_data']);
-const userSession = new UserSession({ appConfig });
+const network = "testnet";
+
+// Replace with your contract address
+const CONTRACT_ADDRESS = "YOUR_CONTRACT_ADDRESS_HERE";
+const CONTRACT_NAME = "message-board";
 
 function App() {
-  const [userData, setUserData] = useState(null);
-  const [status, setStatus] = useState(null);
-  const [pledgeAmount, setPledgeAmount] = useState('');
-  const [contractAddress, setContractAddress] = useState('');
-
-  // Kết nối ví
-  const handleConnect = async () => {
-    connect({
-      userSession,
-      appDetails: {
-        name: 'Crowdfunding App',
-        icon: window.location.origin + '/logo.png',
-      },
-      onFinish: (data) => {
-        setUserData(data.userSession.loadUserData());
-      },
-    });
-  };
-
-  // Đăng xuất
-  const handleDisconnect = () => {
-    userSession.signUserOut();
-    setUserData(null);
-  };
-
-  // Lấy trạng thái hợp đồng
-  const getStatus = async () => {
-    const options = {
-      contractAddress: contractAddress,
-      contractName: 'crowdfunding',
-      functionName: 'get-status',
-      functionArgs: [],
-      network: new StacksTestnet(),
-      senderAddress: userData?.profile?.stxAddress?.testnet,
-    };
-
-    try {
-      const response = await fetch(
-        `https://api.testnet.hiro.so/v2/contracts/call-read/${options.contractAddress}/${options.contractName}/${options.functionName}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            sender: options.senderAddress,
-            arguments: options.functionArgs,
-          }),
-        }
-      );
-      const data = await response.json();
-      setStatus(data.result);
-    } catch (error) {
-      console.error('Error fetching status:', error);
-    }
-  };
-
-  // Đóng góp
-  const handlePledge = async () => {
-    const options = {
-      contractAddress: contractAddress,
-      contractName: 'crowdfunding',
-      functionName: 'pledge',
-      functionArgs: [
-        {
-          type: 'uint',
-          value: pledgeAmount,
-        },
-      ],
-      network: new StacksTestnet(),
-      appDetails: {
-        name: 'Crowdfunding App',
-        icon: window.location.origin + '/logo.png',
-      },
-      onFinish: (data) => {
-        console.log('Transaction submitted:', data);
-        getStatus();
-      },
-    };
-
-    await openContractCall(options);
-  };
-
-  // Hoàn tiền
-  const handleRefund = async () => {
-    const options = {
-      contractAddress: contractAddress,
-      contractName: 'crowdfunding',
-      functionName: 'refund',
-      functionArgs: [],
-      network: new StacksTestnet(),
-      appDetails: {
-        name: 'Crowdfunding App',
-        icon: window.location.origin + '/logo.png',
-      },
-      onFinish: (data) => {
-        console.log('Refund transaction submitted:', data);
-        getStatus();
-      },
-    };
-
-    await openContractCall(options);
-  };
-
-  // Nhận tiền (chủ dự án)
-  const handleClaimFunds = async () => {
-    const options = {
-      contractAddress: contractAddress,
-      contractName: 'crowdfunding',
-      functionName: 'claim-funds',
-      functionArgs: [],
-      network: new StacksTestnet(),
-      appDetails: {
-        name: 'Crowdfunding App',
-        icon: window.location.origin + '/logo.png',
-      },
-      onFinish: (data) => {
-        console.log('Claim funds transaction submitted:', data);
-        getStatus();
-      },
-    };
-
-    await openContractCall(options);
-  };
+  const [connected, setConnected] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [newMessage, setNewMessage] = useState("");
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (userSession.isUserSignedIn()) {
-      setUserData(userSession.loadUserData());
+    setConnected(isConnected());
+    if (isConnected()) {
+      loadMessages();
     }
   }, []);
 
+  // Check for connection changes
+  useEffect(() => {
+    const checkConnection = () => {
+      const connectionStatus = isConnected();
+      if (connectionStatus !== connected) {
+        setConnected(connectionStatus);
+        if (connectionStatus) {
+          loadMessages();
+        }
+      }
+    };
+
+    const intervalId = setInterval(checkConnection, 500);
+    return () => clearInterval(intervalId);
+  }, [connected]);
+
+  const connectWallet = async () => {
+    try {
+      await connect({
+        appDetails: {
+          name: "Message Board",
+          icon: window.location.origin + "/logo.svg",
+        },
+        onFinish: () => {
+          setConnected(true);
+          // Small delay to ensure connection is fully established
+          setTimeout(() => {
+            loadMessages();
+          }, 100);
+        },
+      });
+    } catch (error) {
+      console.error("Connection failed:", error);
+    }
+  };
+
+  const disconnectWallet = () => {
+    disconnect();
+    setConnected(false);
+    setMessages([]);
+  };
+
+  const loadMessages = async () => {
+    try {
+      // Get message count
+      const countResult = await fetchCallReadOnlyFunction({
+        contractAddress: CONTRACT_ADDRESS,
+        contractName: CONTRACT_NAME,
+        functionName: "get-message-count",
+        functionArgs: [],
+        network,
+        senderAddress: CONTRACT_ADDRESS,
+      });
+
+      const count = parseInt(countResult.value);
+
+      // Load recent messages
+      const messagePromises = [];
+      for (let i = Math.max(1, count - 4); i <= count; i++) {
+        messagePromises.push(
+          fetchCallReadOnlyFunction({
+            contractAddress: CONTRACT_ADDRESS,
+            contractName: CONTRACT_NAME,
+            functionName: "get-message",
+            functionArgs: [uintCV(i)],
+            network,
+            senderAddress: CONTRACT_ADDRESS,
+          })
+        );
+      }
+
+      const messageResults = await Promise.all(messagePromises);
+      const loadedMessages = messageResults
+        .map((result, index) => ({
+          id: count - messageResults.length + index + 1,
+          content: result.value.value,
+        }))
+        .filter((msg) => msg.content !== undefined);
+
+      setMessages(loadedMessages);
+    } catch (error) {
+      console.error("Error loading messages:", error);
+    }
+  };
+
+  const postMessage = async () => {
+    if (!newMessage.trim()) return;
+
+    setLoading(true);
+    try {
+      const result = await request("stx_callContract", {
+        contract: `${CONTRACT_ADDRESS}.${CONTRACT_NAME}`,
+        functionName: "add-message",
+        functionArgs: [stringUtf8CV(newMessage)],
+        network,
+      });
+
+      console.log("Transaction submitted:", result.txid);
+      setNewMessage("");
+
+      // Reload messages after a delay to allow the transaction to process
+      setTimeout(() => {
+        loadMessages();
+        setLoading(false);
+      }, 2000);
+    } catch (error) {
+      console.error("Error posting message:", error);
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className="container">
-      <header>
-        <h1>Crowdfunding Platform</h1>
-        {!userData ? (
-          <button onClick={handleConnect}>Connect Wallet</button>
+    <div className="App">
+      <header className="App-header">
+        <h1>📝 Stacks Message Board</h1>
+
+        {!connected ? (
+          <button onClick={connectWallet} className="connect-button">
+            Connect Wallet
+          </button>
         ) : (
-          <div>
-            <p>Connected as: {userData.profile.stxAddress.testnet}</p>
-            <button onClick={handleDisconnect}>Disconnect</button>
-          </div>
+          <button onClick={disconnectWallet} className="disconnect-button">
+            Disconnect
+          </button>
         )}
       </header>
 
-      <div className="contract-section">
-        <h2>Contract Interaction</h2>
-        <input
-          type="text"
-          placeholder="Contract Address"
-          value={contractAddress}
-          onChange={(e) => setContractAddress(e.target.value)}
-        />
-        <button onClick={getStatus}>Get Status</button>
-      </div>
+      {connected && (
+        <main className="App-main">
+          <div className="post-message">
+            <h2>Post a Message</h2>
+            <div className="message-input">
+              <input
+                type="text"
+                value={newMessage}
+                onChange={(e) => setNewMessage(e.target.value)}
+                placeholder="What's on your mind?"
+                maxLength={280}
+                disabled={loading}
+              />
+              <button
+                onClick={postMessage}
+                disabled={loading || !newMessage.trim()}
+              >
+                {loading ? "Posting..." : "Post"}
+              </button>
+            </div>
+          </div>
 
-      {status && (
-        <div className="status">
-          <h3>Campaign Status</h3>
-          <p>Goal: {status.funding-goal} µSTX</p>
-          <p>Pledged: {status.total-pledged} µSTX</p>
-          <p>Deadline: Block {status.deadline}</p>
-          <p>Status: {status.funding-successful ? 'Successful' : 'Not Funded'}</p>
-        </div>
+          <div className="messages">
+            <h2>Recent Messages</h2>
+            <button onClick={loadMessages} className="refresh-button">
+              Refresh
+            </button>
+            {messages.length === 0 ? (
+              <p>No messages yet. Be the first to post!</p>
+            ) : (
+              <ul>
+                {messages.map((message) => (
+                  <li key={message.id}>
+                    <strong>Message #{message.id}:</strong> {message.content}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </main>
       )}
-
-      <div className="actions">
-        <h3>Actions</h3>
-        <div>
-          <input
-            type="number"
-            placeholder="Amount (µSTX)"
-            value={pledgeAmount}
-            onChange={(e) => setPledgeAmount(e.target.value)}
-          />
-          <button onClick={handlePledge}>Pledge</button>
-        </div>
-        <button onClick={handleRefund}>Request Refund</button>
-        <button onClick={handleClaimFunds}>Claim Funds (Owner Only)</button>
-      </div>
     </div>
   );
 }
